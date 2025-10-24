@@ -150,11 +150,16 @@ class DxfParser:
         """
         final_entities: List[DXFEntity] = []
 
+        # Defensive Programming: Check for invalid block references before exploding.
+        # Some DXF files may contain INSERT entities that point to non-existent blocks.
+        if insert_entity.block() is None:
+            logger.warning(f"跳过无效的块引用 '{insert_entity.dxf.name}'，因为它没有关联的块定义。")
+            return final_entities
+
         # Step 1: Use the robust built-in explode() for geometry.
         # This handles recursion, transformations, and skips ATTDEFs automatically.
         try:
-            # The explode() method yields all sub-entities of the block reference
-            # already transformed into the target coordinate space.
+            # Now it is safe to call explode()
             exploded_geometry = insert_entity.explode()
             final_entities.extend(exploded_geometry)
         except Exception as e:
