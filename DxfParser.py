@@ -6,11 +6,9 @@ from typing import List, Tuple, Optional, Dict, Any
 # Third-party imports
 import ezdxf
 import numpy as np
-import torch
 from ezdxf.document import Drawing
 from ezdxf.layouts import Modelspace
 from ezdxf.entities import DXFEntity
-from torch_geometric.data import HeteroData
 
 # Set up a logger for the module
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -75,7 +73,7 @@ class DxfParser:
             logger.error(f"Corrupt DXF file: {self.dxf_path}. Error: {e}")
             raise e
 
-    def process(self, stage: int) -> Tuple[Optional[HeteroData], Optional[Dict[str, Any]]]:
+    def process(self, stage: int) -> Tuple[List[DXFEntity], Dict[str, Any]]:
         """
         Main public method to run the entire processing pipeline.
 
@@ -85,28 +83,26 @@ class DxfParser:
                    Stage 2 processes all entities for final graph construction.
 
         Returns:
-            A tuple containing the graph data and metadata, or (None, None) if processing fails.
+            A tuple containing the list of entities and metadata.
         """
         # 1. Extract and filter entities based on stage
         entities = self._extract_and_explode_entities(stage)
 
         # 2. Calculate transformation parameters based on stage
-        # transform_params = self._calculate_transform_params(entities, stage)
+        transform_params = self._calculate_transform_params(entities, stage)
 
-        # 3. Build the heterogeneous graph
-        # graph_data = self._build_graph(entities, transform_params, stage)
+        # 3. Prepare metadata
+        meta_data = {
+            'dxf_path': str(self.dxf_path),
+            'stage': stage,
+            'entity_count': len(entities),
+            'transform_params': transform_params
+        }
 
-        # 4. Prepare metadata
-        # meta_data = {
-        #     'dxf_path': str(self.dxf_path),
-        #     'stage': stage,
-        #     'transform_params': transform_params
-        # }
+        # 4. Return entities and metadata
+        logger.info(f"Processing for stage {stage} complete.")
 
-        # 5. Return graph_data and meta_data
-        logger.info(f"Processing for stage {stage} is outlined. Implementation pending.")
-
-        return (None, None)
+        return entities, meta_data
 
     def _extract_and_explode_entities(self, stage: int) -> List[DXFEntity]:
         """
@@ -190,43 +186,6 @@ class DxfParser:
         logger.info(f"Stage {stage}: Calculating transformation parameters. Implementation pending.")
         return {}
 
-    def _build_graph(self, entities: List[DXFEntity], transform_params: Dict[str, Any], stage: int) -> HeteroData:
-        """
-        Creates nodes, encodes features, and builds edges for the HeteroData object.
-
-        Args:
-            entities: A list of DXF entities.
-            transform_params: A dictionary of transformation parameters.
-            stage: The processing stage (1 or 2).
-
-        Returns:
-            A HeteroData object representing the graph.
-        """
-        logger.info(f"Stage {stage}: Building heterogeneous graph. Implementation pending.")
-        return HeteroData()
-
-    @staticmethod
-    def _save_graph(graph_data: HeteroData, meta_data: Dict[str, Any], output_path: str) -> None:
-        """
-        Saves the graph data and metadata to the specified output path.
-
-        Args:
-            graph_data: The HeteroData object to save.
-            meta_data: A dictionary of metadata to save as a JSON file.
-            output_path: The path to save the output files (without extension).
-        """
-        output_path = Path(output_path)
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-
-        # Save graph data
-        torch.save(graph_data, f"{output_path}.pt")
-        logger.info(f"Graph data saved to {output_path}.pt")
-
-        # Save metadata
-        import json
-        with open(f"{output_path}.json", 'w') as f:
-            json.dump(meta_data, f, indent=4)
-        logger.info(f"Metadata saved to {output_path}.json")
 
     def save_exploded_dxf(self, output_path: str) -> None:
         """
