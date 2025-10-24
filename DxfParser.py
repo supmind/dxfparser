@@ -106,8 +106,8 @@ class DxfParser:
 
     def _extract_and_explode_entities(self, stage: int) -> List[DXFEntity]:
         """
-        此方法根据`stage`筛选实体类型。
-        核心功能: 遍历初始实体列表，当遇到'INSERT'类型时，调用 `_handle_insert_entity` 方法来处理，而不是简单分解。
+        此方法根据`stage`筛选实体类型，并调用`_handle_insert_entity`处理块。
+        在stage 1模式下，会进行二次过滤以确保只返回纯几何实体。
         """
         if stage == 1:
             allowed_types = self.SUPPORTED_GEOMETRIES
@@ -118,52 +118,49 @@ class DxfParser:
             return []
 
         logger.info(f"阶段 {stage}: 正在提取以下类型的实体: {allowed_types}")
+        # Note: 'INSERT' is included in SUPPORTED_GEOMETRIES, so it's always considered.
         initial_entities = [e for e in self.modelspace if e.dxf.dxftype in allowed_types]
         logger.info(f"在模型空间中找到 {len(initial_entities)} 个初始实体。")
 
-        final_entities: List[DXFEntity] = []
+        exploded_entities: List[DXFEntity] = []
         for entity in initial_entities:
             if entity.dxf.dxftype == 'INSERT':
-                final_entities.extend(self._handle_insert_entity(entity))
+                exploded_entities.extend(self._handle_insert_entity(entity))
             else:
-                final_entities.append(entity)
+                exploded_entities.append(entity)
 
-        # Important: For stage 1, filter out any non-geometric entities that might
-        # have been extracted from blocks (like ATTRIB).
+        # Secondary filtering for Stage 1 to ensure pure geometry.
+        # This removes entities like ATTRIB that may have been exploded from blocks.
         if stage == 1:
-            final_entities = [e for e in final_entities if e.dxf.dxftype in self.SUPPORTED_GEOMETRIES]
+            # We must also filter out 'INSERT' itself, as it's a container, not a primitive geometry.
+            final_geometries = [
+                e for e in exploded_entities
+                if e.dxf.dxftype in self.SUPPORTED_GEOMETRIES and e.dxf.dxftype != 'INSERT'
+            ]
+            logger.info(f"阶段 1 二次过滤后，剩余纯几何实体: {len(final_geometries)}")
+            return final_geometries
 
-        logger.info(f"块分解后的实体总数: {len(final_entities)}")
-        return final_entities
+        logger.info(f"块分解后的实体总数: {len(exploded_entities)}")
+        return exploded_entities
 
     def _handle_insert_entity(self, insert_entity: DXFEntity) -> List[DXFEntity]:
         """
         这是一个关键的辅助方法，用于正确处理带属性的块。
-        第一步: 分解块定义中的几何与静态文本实体，并应用块实例的变换矩阵。此过程应忽略块定义中的'ATTDEF'。
-        第二步: 遍历块实例的属性 (`insert_entity.attribs`)，将每个属性实体(`ATTRIB`)作为独立的、已变换好的实体加入到返回列表中。
-        支持递归处理嵌套块。
+        它使用ezdxf内置的explode()方法处理几何体，并单独处理动态属性。
         """
         final_entities: List[DXFEntity] = []
+
+        # Step 1: Use the robust built-in explode() for geometry.
+        # This handles recursion, transformations, and skips ATTDEFs automatically.
         try:
-            block_def = self.doc.blocks.get(insert_entity.dxf.name)
-        except KeyError:
-            logger.warning(f"找不到块定义 '{insert_entity.dxf.name}'，已跳过。")
-            return final_entities
+            # The explode() method yields all sub-entities of the block reference
+            # already transformed into the target coordinate space.
+            exploded_geometry = insert_entity.explode()
+            final_entities.extend(exploded_geometry)
+        except Exception as e:
+            logger.error(f"在分解块 '{insert_entity.dxf.name}' 时发生意外错误: {e}")
 
-        # Step 1: Handle geometry and static text, ignoring ATTDEFs
-        for entity in block_def:
-            if entity.dxf.dxftype == 'ATTDEF':
-                continue
-
-            new_entity = entity.copy()
-            new_entity.transform(insert_entity.matrix44)
-
-            if new_entity.dxf.dxftype == 'INSERT':
-                final_entities.extend(self._handle_insert_entity(new_entity))
-            else:
-                final_entities.append(new_entity)
-
-        # Step 2: Handle attribute entities
+        # Step 2: Handle attached ATTRIB entities separately, as explode() ignores them.
         if insert_entity.has_attribs:
             for attrib in insert_entity.attribs:
                 final_entities.append(attrib)
