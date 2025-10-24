@@ -227,3 +227,79 @@ class DxfParser:
         with open(f"{output_path}.json", 'w') as f:
             json.dump(meta_data, f, indent=4)
         logger.info(f"Metadata saved to {output_path}.json")
+
+    def save_exploded_dxf(self, output_path: str) -> None:
+        """
+        处理DXF文件，将所有块实体分解为基础图元，并将结果保存到一个新的DXF文件中。
+        这个方法主要用于调试和验证块分解的正确性。
+
+        Args:
+            output_path: 输出DXF文件的路径。
+        """
+        logger.info("开始执行块分解并保存为新的DXF文件...")
+
+        # 使用stage=2来确保所有类型的实体（几何和注解）都被处理
+        exploded_entities = self._extract_and_explode_entities(stage=2)
+
+        # 创建一个新的DXF文档
+        new_doc = ezdxf.new()
+        new_msp = new_doc.modelspace()
+
+        # 将所有分解后的实体添加到新文档的模型空间
+        for entity in exploded_entities:
+            try:
+                # ATTRIB实体比较特殊，需要作为TEXT添加
+                if entity.dxf.dxftype() == 'ATTRIB':
+                    new_msp.add_text(
+                        text=entity.dxf.text,
+                        dxfattribs={
+                            'insert': entity.dxf.insert,
+                            'height': entity.dxf.height,
+                            'rotation': entity.dxf.rotation,
+                            'style': entity.dxf.style,
+                        }
+                    )
+                else:
+                    new_msp.add_entity(entity)
+            except Exception as e:
+                logger.warning(f"无法添加实体 {entity.dxf.dxftype()} 到新文档中: {e}")
+
+        # 保存新文档
+        try:
+            output_path = Path(output_path)
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            new_doc.saveas(output_path)
+            logger.info(f"成功将分解后的DXF文件保存到: {output_path}")
+        except Exception as e:
+            logger.error(f"保存新的DXF文件失败: {e}")
+
+
+if __name__ == '__main__':
+    # ==============================================================================
+    # 使用示例:
+    # 1. 将您的DXF测试文件路径替换下面的 'path/to/your/input.dxf'
+    # 2. 将您希望保存的路径替换下面的 'path/to/your/output.dxf'
+    # 3. 在终端中直接运行此脚本: python DxfParser.py
+    # ==============================================================================
+
+    # 请在这里修改输入文件路径
+    input_dxf_path = 'path/to/your/input.dxf'
+
+    # 请在这里修改输出文件路径
+    output_dxf_path = 'path/to/your/output.dxf'
+
+    try:
+        # 检查输入文件是否存在
+        if not Path(input_dxf_path).is_file():
+            logger.error("="*80)
+            logger.error(f"测试失败: 输入文件未找到 '{input_dxf_path}'")
+            logger.error("请在脚本的 if __name__ == '__main__': 部分修改 `input_dxf_path` 为您的测试文件路径。")
+            logger.error("="*80)
+        else:
+            logger.info(f"开始处理DXF文件: {input_dxf_path}")
+            parser = DxfParser(dxf_path=input_dxf_path)
+            parser.save_exploded_dxf(output_path=output_dxf_path)
+            logger.info("处理完成。")
+
+    except Exception as main_exc:
+        logger.error(f"在主执行流程中发生严重错误: {main_exc}")
