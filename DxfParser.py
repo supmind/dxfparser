@@ -88,7 +88,7 @@ class DxfParser:
             A tuple containing the graph data and metadata, or (None, None) if processing fails.
         """
         # 1. Extract and filter entities based on stage
-        # entities = self._extract_entities(stage)
+        entities = self._extract_and_explode_entities(stage)
 
         # 2. Calculate transformation parameters based on stage
         # transform_params = self._calculate_transform_params(entities, stage)
@@ -108,68 +108,71 @@ class DxfParser:
 
         return (None, None)
 
-    def _extract_entities(self, stage: int) -> List[DXFEntity]:
+    def _extract_and_explode_entities(self, stage: int) -> List[DXFEntity]:
         """
-        Filters entities based on the stage and handles block explosions.
-        Stage 1: Extracts geometry-only entities.
-        Stage 2: Extracts all supported entities (geometry and annotations).
-
-        Args:
-            stage: The processing stage (1 or 2).
-
-        Returns:
-            A list of filtered and exploded DXF entities.
+        此方法根据`stage`筛选实体类型。
+        核心功能: 遍历初始实体列表，当遇到'INSERT'类型时，调用 `_handle_insert_entity` 方法来处理，而不是简单分解。
         """
         if stage == 1:
             allowed_types = self.SUPPORTED_GEOMETRIES
         elif stage == 2:
             allowed_types = self.SUPPORTED_GEOMETRIES + self.SUPPORTED_ANNOTATIONS
         else:
-            logger.warning(f"Invalid stage '{stage}' provided. No entities will be extracted.")
+            logger.warning(f"提供了无效的阶段 '{stage}'。将不会提取任何实体。")
             return []
 
-        logger.info(f"Stage {stage}: Extracting entities of types: {allowed_types}")
+        logger.info(f"阶段 {stage}: 正在提取以下类型的实体: {allowed_types}")
         initial_entities = [e for e in self.modelspace if e.dxf.dxftype() in allowed_types]
-        logger.info(f"Found {len(initial_entities)} initial entities in modelspace.")
+        logger.info(f"在模型空间中找到 {len(initial_entities)} 个初始实体。")
 
         final_entities: List[DXFEntity] = []
         for entity in initial_entities:
             if entity.dxf.dxftype() == 'INSERT':
-                final_entities.extend(self._explode_block(entity, allowed_types))
+                final_entities.extend(self._handle_insert_entity(entity))
             else:
                 final_entities.append(entity)
 
-        logger.info(f"Total entities after block explosion: {len(final_entities)}")
+        # Important: For stage 1, filter out any non-geometric entities that might
+        # have been extracted from blocks (like ATTRIB).
+        if stage == 1:
+            final_entities = [e for e in final_entities if e.dxf.dxftype() in self.SUPPORTED_GEOMETRIES]
+
+        logger.info(f"块分解后的实体总数: {len(final_entities)}")
         return final_entities
 
-    def _explode_block(self, block_ref: DXFEntity, allowed_types: List[str]) -> List[DXFEntity]:
+    def _handle_insert_entity(self, insert_entity: DXFEntity) -> List[DXFEntity]:
         """
-        Recursively explodes a block reference and applies its transformation.
-
-        Args:
-            block_ref: An 'INSERT' DXF entity.
-            allowed_types: A list of DXF entity types to keep after exploding.
-
-        Returns:
-            A list of sub-entities extracted from the block.
+        这是一个关键的辅助方法，用于正确处理带属性的块。
+        第一步: 分解块定义中的几何与静态文本实体，并应用块实例的变换矩阵。此过程应忽略块定义中的'ATTDEF'。
+        第二步: 遍历块实例的属性 (`insert_entity.attribs`)，将每个属性实体(`ATTRIB`)作为独立的、已变换好的实体加入到返回列表中。
+        支持递归处理嵌套块。
         """
-        exploded_entities: List[DXFEntity] = []
+        final_entities: List[DXFEntity] = []
         try:
-            block_def = self.doc.blocks.get(block_ref.dxf.name)
+            block_def = self.doc.blocks.get(insert_entity.dxf.name)
         except KeyError:
-            logger.warning(f"Block definition for '{block_ref.dxf.name}' not found. Skipping.")
-            return exploded_entities
+            logger.warning(f"找不到块定义 '{insert_entity.dxf.name}'，已跳过。")
+            return final_entities
 
+        # Step 1: Handle geometry and static text, ignoring ATTDEFs
         for entity in block_def:
+            if entity.dxf.dxftype() == 'ATTDEF':
+                continue
+
             new_entity = entity.copy()
-            new_entity.transform(block_ref.matrix44)
+            new_entity.transform(insert_entity.matrix44)
 
             if new_entity.dxf.dxftype() == 'INSERT':
-                exploded_entities.extend(self._explode_block(new_entity, allowed_types))
-            elif new_entity.dxf.dxftype() in allowed_types:
-                exploded_entities.append(new_entity)
+                final_entities.extend(self._handle_insert_entity(new_entity))
+            else:
+                final_entities.append(new_entity)
 
-        return exploded_entities
+        # Step 2: Handle attribute entities
+        if insert_entity.has_attribs:
+            for attrib in insert_entity.attribs:
+                final_entities.append(attrib)
+
+        return final_entities
 
     def _calculate_transform_params(self, entities: List[DXFEntity], stage: int) -> Dict[str, Any]:
         """
