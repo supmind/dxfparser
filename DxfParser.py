@@ -150,22 +150,23 @@ class DxfParser:
         """
         final_entities: List[DXFEntity] = []
 
-        # Defensive Programming: Check for invalid block references before exploding.
-        # Some DXF files may contain INSERT entities that point to non-existent blocks.
-        if insert_entity.block() is None:
+        block_def = insert_entity.block()
+
+        # Defensive Programming: Check for invalid or empty block definitions.
+        if block_def is None:
             logger.warning(f"跳过无效的块引用 '{insert_entity.dxf.name}'，因为它没有关联的块定义。")
-            return final_entities
+        elif not block_def:  # Block definition exists but is empty
+            logger.info(f"块 '{insert_entity.dxf.name}' 的定义为空，跳过几何分解。")
+        else:
+            # Block definition exists and is not empty, safe to explode.
+            try:
+                exploded_geometry = insert_entity.explode()
+                final_entities.extend(exploded_geometry)
+            except Exception as e:
+                # Catching potential errors from deep within ezdxf's explode logic
+                logger.error(f"在分解块 '{insert_entity.dxf.name}' 时发生意外的底层错误: {e}")
 
-        # Step 1: Use the robust built-in explode() for geometry.
-        # This handles recursion, transformations, and skips ATTDEFs automatically.
-        try:
-            # Now it is safe to call explode()
-            exploded_geometry = insert_entity.explode()
-            final_entities.extend(exploded_geometry)
-        except Exception as e:
-            logger.error(f"在分解块 '{insert_entity.dxf.name}' 时发生意外错误: {e}")
-
-        # Step 2: Handle attached ATTRIB entities separately, as explode() ignores them.
+        # Always process attached ATTRIB entities, regardless of the block's geometry.
         if insert_entity.attribs:
             for attrib in insert_entity.attribs:
                 final_entities.append(attrib)
