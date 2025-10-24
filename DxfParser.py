@@ -120,21 +120,56 @@ class DxfParser:
         Returns:
             A list of filtered and exploded DXF entities.
         """
-        logger.info(f"Stage {stage}: Extracting entities. Implementation pending.")
-        return []
+        if stage == 1:
+            allowed_types = self.SUPPORTED_GEOMETRIES
+        elif stage == 2:
+            allowed_types = self.SUPPORTED_GEOMETRIES + self.SUPPORTED_ANNOTATIONS
+        else:
+            logger.warning(f"Invalid stage '{stage}' provided. No entities will be extracted.")
+            return []
 
-    def _explode_block(self, block_ref: DXFEntity) -> List[DXFEntity]:
+        logger.info(f"Stage {stage}: Extracting entities of types: {allowed_types}")
+        initial_entities = [e for e in self.modelspace if e.dxf.dxftype() in allowed_types]
+        logger.info(f"Found {len(initial_entities)} initial entities in modelspace.")
+
+        final_entities: List[DXFEntity] = []
+        for entity in initial_entities:
+            if entity.dxf.dxftype() == 'INSERT':
+                final_entities.extend(self._explode_block(entity, allowed_types))
+            else:
+                final_entities.append(entity)
+
+        logger.info(f"Total entities after block explosion: {len(final_entities)}")
+        return final_entities
+
+    def _explode_block(self, block_ref: DXFEntity, allowed_types: List[str]) -> List[DXFEntity]:
         """
         Recursively explodes a block reference and applies its transformation.
 
         Args:
             block_ref: An 'INSERT' DXF entity.
+            allowed_types: A list of DXF entity types to keep after exploding.
 
         Returns:
             A list of sub-entities extracted from the block.
         """
-        logger.info(f"Exploding block: {block_ref.dxf.name}. Implementation pending.")
-        return []
+        exploded_entities: List[DXFEntity] = []
+        try:
+            block_def = self.doc.blocks.get(block_ref.dxf.name)
+        except KeyError:
+            logger.warning(f"Block definition for '{block_ref.dxf.name}' not found. Skipping.")
+            return exploded_entities
+
+        for entity in block_def:
+            new_entity = entity.copy()
+            new_entity.transform(block_ref.matrix44)
+
+            if new_entity.dxf.dxftype() == 'INSERT':
+                exploded_entities.extend(self._explode_block(new_entity, allowed_types))
+            elif new_entity.dxf.dxftype() in allowed_types:
+                exploded_entities.append(new_entity)
+
+        return exploded_entities
 
     def _calculate_transform_params(self, entities: List[DXFEntity], stage: int) -> Dict[str, Any]:
         """
