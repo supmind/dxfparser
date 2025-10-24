@@ -118,12 +118,12 @@ class DxfParser:
             return []
 
         logger.info(f"阶段 {stage}: 正在提取以下类型的实体: {allowed_types}")
-        initial_entities = [e for e in self.modelspace if e.dxf.dxftype() in allowed_types]
+        initial_entities = [e for e in self.modelspace if e.dxf.dxftype in allowed_types]
         logger.info(f"在模型空间中找到 {len(initial_entities)} 个初始实体。")
 
         final_entities: List[DXFEntity] = []
         for entity in initial_entities:
-            if entity.dxf.dxftype() == 'INSERT':
+            if entity.dxf.dxftype == 'INSERT':
                 final_entities.extend(self._handle_insert_entity(entity))
             else:
                 final_entities.append(entity)
@@ -131,7 +131,7 @@ class DxfParser:
         # Important: For stage 1, filter out any non-geometric entities that might
         # have been extracted from blocks (like ATTRIB).
         if stage == 1:
-            final_entities = [e for e in final_entities if e.dxf.dxftype() in self.SUPPORTED_GEOMETRIES]
+            final_entities = [e for e in final_entities if e.dxf.dxftype in self.SUPPORTED_GEOMETRIES]
 
         logger.info(f"块分解后的实体总数: {len(final_entities)}")
         return final_entities
@@ -152,13 +152,13 @@ class DxfParser:
 
         # Step 1: Handle geometry and static text, ignoring ATTDEFs
         for entity in block_def:
-            if entity.dxf.dxftype() == 'ATTDEF':
+            if entity.dxf.dxftype == 'ATTDEF':
                 continue
 
             new_entity = entity.copy()
             new_entity.transform(insert_entity.matrix44)
 
-            if new_entity.dxf.dxftype() == 'INSERT':
+            if new_entity.dxf.dxftype == 'INSERT':
                 final_entities.extend(self._handle_insert_entity(new_entity))
             else:
                 final_entities.append(new_entity)
@@ -208,7 +208,7 @@ class DxfParser:
         for entity in exploded_entities:
             try:
                 # ATTRIB实体比较特殊，需要作为TEXT添加
-                if entity.dxf.dxftype() == 'ATTRIB':
+                if entity.dxf.dxftype == 'ATTRIB':
                     new_msp.add_text(
                         text=entity.dxf.text,
                         dxfattribs={
@@ -221,7 +221,7 @@ class DxfParser:
                 else:
                     new_msp.add_entity(entity)
             except Exception as e:
-                logger.warning(f"无法添加实体 {entity.dxf.dxftype()} 到新文档中: {e}")
+                logger.warning(f"无法添加实体 {entity.dxf.dxftype} 到新文档中: {e}")
 
         # 保存新文档
         try:
