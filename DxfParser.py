@@ -161,7 +161,7 @@ class DxfParser:
             logger.error(f"在分解块 '{insert_entity.dxf.name}' 时发生意外错误: {e}")
 
         # Step 2: Handle attached ATTRIB entities separately, as explode() ignores them.
-        if insert_entity.has_attribs:
+        if insert_entity.attribs:
             for attrib in insert_entity.attribs:
                 final_entities.append(attrib)
 
