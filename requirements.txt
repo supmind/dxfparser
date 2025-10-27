@@ -1,0 +1,5 @@
+ezdxf
+numpy
+scikit-learn
+torch
+torch-geometric
