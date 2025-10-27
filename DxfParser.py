@@ -402,14 +402,14 @@ class DxfParser:
                 if s1.intersects(s2) and not s1.touches(s2):
                     add_edge('intersects')
 
-                # intelligent contains (确保方向)
-                area_ratio_s1_in_s2 = s1.area / s2.area if s2.area > 1e-6 else float('inf')
-                area_ratio_s2_in_s1 = s2.area / s1.area if s1.area > 1e-6 else float('inf')
+                # intelligent contains (确保方向) - 根据用户要求移除
+                # area_ratio_s1_in_s2 = s1.area / s2.area if s2.area > 1e-6 else float('inf')
+                # area_ratio_s2_in_s1 = s2.area / s1.area if s1.area > 1e-6 else float('inf')
 
-                if s2.contains(s1) and area_ratio_s1_in_s2 < 0.5:
-                    edge_indices[(dst_type, 'contains', src_type)].append([dst_info['idx'], src_info['idx']])
-                elif s1.contains(s2) and area_ratio_s2_in_s1 < 0.5:
-                    edge_indices[(src_type, 'contains', dst_type)].append([src_info['idx'], dst_info['idx']])
+                # if s2.contains(s1) and area_ratio_s1_in_s2 < 0.5:
+                #     edge_indices[(dst_type, 'contains', src_type)].append([dst_info['idx'], src_info['idx']])
+                # elif s1.contains(s2) and area_ratio_s2_in_s1 < 0.5:
+                #     edge_indices[(src_type, 'contains', dst_type)].append([src_info['idx'], dst_info['idx']])
 
         for edge_type, indices in edge_indices.items():
             if indices:
@@ -476,8 +476,6 @@ class DxfParser:
                     msp_topo.add_line(p1, p2, dxfattribs={'color': 1}) # Red
                 if s1.intersects(s2) and not s1.touches(s2):
                     msp_topo.add_line(p1, p2, dxfattribs={'color': 5}) # Blue
-                if s1.area > 1e-6 and s1.contains(s2) and (s2.area / s1.area) < 0.5:
-                    msp_topo.add_line(p1, p2, dxfattribs={'color': 3}) # Green
 
         doc_topo.saveas(output_dir / "verification_topology.dxf")
         logger.info(f"Verification files saved to '{output_dir}'.")
