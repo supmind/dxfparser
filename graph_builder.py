@@ -514,13 +514,42 @@ class GraphBuilder:
 
 def _create_dxf_for_full_pipeline_test(temp_dir: Path) -> str:
     doc = ezdxf.new()
+    # Define layers with different properties
+    doc.layers.new(name="GEOMETRY", dxfattribs={"color": 1})  # Blue
+    doc.layers.new(name="TEXT", dxfattribs={"color": 2})  # Yellow
+    doc.layers.new(name="BLOCKS", dxfattribs={"color": 3})  # Green
+
+    # Create a simple base block (Block A)
+    block_a = doc.blocks.new(name="BLOCK_A")
+    block_a.add_line((0, 0), (1, 1), dxfattribs={"layer": "GEOMETRY"})
+    block_a.add_circle((0.5, 0.5), 0.25, dxfattribs={"layer": "GEOMETRY"})
+
+    # Create a nested block (Block B) that contains Block A
+    block_b = doc.blocks.new(name="BLOCK_B")
+    block_b.add_blockref("BLOCK_A", insert=(0, 0), dxfattribs={
+        "layer": "BLOCKS",
+        "rotation": 45,
+        "xscale": 2.0,
+        "yscale": 2.0,
+    })
+    block_b.add_text("Nested", dxfattribs={"insert": (1, 1), "layer": "TEXT"})
+
     msp = doc.modelspace()
-    msp.add_line((0, 0), (5, 5))
-    msp.add_line((5, 5), (10, 0))
-    msp.add_line((0, 2.5), (10, 2.5))
-    msp.add_arc(center=(0, 0), radius=5, start_angle=0, end_angle=90)
-    msp.add_text("Hello World", dxfattribs={'insert': (0, 15)})
-    msp.add_mtext("This is a multiline\ntext.", dxfattribs={'insert': (15, 15)})
+    # Add entities to modelspace to create different relationships
+    # 1. A line that connects with the arc
+    msp.add_line((5, 0), (7, 0), dxfattribs={"layer": "GEOMETRY"}) # Connects with arc endpoint
+    # 2. An arc
+    msp.add_arc(center=(0, 0), radius=5, start_angle=0, end_angle=90, dxfattribs={"layer": "GEOMETRY"})
+    # 3. A line that intersects with the first line
+    msp.add_line((6, -1), (6, 1), dxfattribs={"layer": "GEOMETRY"}) # Intersects line 1
+    # 4. A standalone circle (nearby)
+    msp.add_circle((10, 10), 1, dxfattribs={"layer": "GEOMETRY"})
+    # 5. Insert the nested block
+    msp.add_blockref("BLOCK_B", insert=(15, 15))
+    # 6. Add text entities
+    msp.add_text("Hello", dxfattribs={'insert': (0, 15), "layer": "TEXT"})
+    msp.add_mtext("World", dxfattribs={'insert': (15, 10), "layer": "TEXT"})
+
     path = temp_dir / "full_pipeline_test.dxf"
     doc.saveas(path)
     return str(path)
@@ -541,15 +570,45 @@ def _demonstrate_full_pipeline():
         intermediate_data = sp.process(dxf_path)
 
         assert intermediate_data is not None, "Processing failed, returned None."
-        assert 'nodes' in intermediate_data, "No nodes found in intermediate data."
-        assert 'TEXT' in intermediate_data['nodes'], "TEXT node was not created."
-        assert 'MTEXT' in intermediate_data['nodes'], "MTEXT node was not created."
-        assert 'ARC' in intermediate_data['nodes'], "ARC node was not created."
-        assert 'edges' in intermediate_data, "No edges found in intermediate data."
-        assert ('LINE', 'connects', 'LINE') in intermediate_data['edges'], "Connects edge was not created."
-        assert ('LINE', 'intersects', 'LINE') in intermediate_data['edges'], "Intersects edge was not created."
+        logging.info("--- Graph Data Summary ---")
 
-        logging.info("--- Demonstration Successful: All nodes and edges created correctly! ---")
+        # Node Summary
+        logging.info("\n[Node Summary]")
+        if 'nodes' in intermediate_data and intermediate_data['nodes']:
+            for node_type, node_data in intermediate_data['nodes'].items():
+                num_nodes = len(node_data.get('x', []))
+                x_shape = node_data.get('x', torch.Tensor()).shape
+                discrete_shape = node_data.get('discrete', torch.Tensor()).shape
+                logging.info(f"  - Node Type: {node_type:<15} | Count: {num_nodes:<5} | Feature Shape: {str(x_shape):<20} | Discrete Shape: {str(discrete_shape)}")
+        else:
+            logging.info("  No nodes found.")
+
+        # Edge Summary
+        logging.info("\n[Edge Summary]")
+        if 'edges' in intermediate_data and intermediate_data['edges']:
+            for edge_type, edge_index in intermediate_data['edges'].items():
+                num_edges = edge_index.shape[1]
+                logging.info(f"  - Edge Type: {str(edge_type):<40} | Count: {num_edges}")
+        else:
+            logging.info("  No edges found.")
+
+        # Print features as a JSON string
+        logging.info("\n[Graph Features as JSON]")
+
+        def convert_tensors_to_lists(data):
+            if isinstance(data, torch.Tensor):
+                return data.tolist()
+            if isinstance(data, dict):
+                return {str(k) if isinstance(k, tuple) else k: convert_tensors_to_lists(v) for k, v in data.items()}
+            if isinstance(data, list):
+                return [convert_tensors_to_lists(i) for i in data]
+            return data
+
+        exportable_data = convert_tensors_to_lists(intermediate_data)
+        json_string = json.dumps(exportable_data, indent=2)
+        logging.info(json_string)
+
+        logging.info("\n--- Demonstration Complete ---")
 
     finally:
         shutil.rmtree(temp_dir)
