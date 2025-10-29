@@ -152,7 +152,8 @@ class ArcProcessor(EntityProcessor):
         center = transform.transform(entity.dxf.center)
         norm_center = SingleDrawingProcessor._normalize_coords(center, bbox_min, scale)
         radius = entity.dxf.radius * transform.ux.magnitude
-        # Normalize angles to be between 0 and 1
+        # Normalize angles by dividing by 360. DXF angles can exceed 360 or be negative.
+        # This initial normalization will be further standardized by the GraphBuilder.
         start_angle = entity.dxf.start_angle / 360.0
         end_angle = entity.dxf.end_angle / 360.0
         return torch.tensor([*norm_center, radius, start_angle, end_angle], dtype=torch.float)
@@ -161,11 +162,13 @@ class ArcProcessor(EntityProcessor):
 class LwPolylineProcessor(EntityProcessor):
     def get_centroid(self, entity, transform):
         try:
-            # Use flattening to get a more accurate representation of the centroid
+            # First, transform all points to the world coordinate system
             points = list(entity.flattening(distance=0.1))
             if not points: return None
-            centroid = sum(points, Vec3()) / len(points)
-            return transform.transform(centroid)
+            transformed_points = [transform.transform(p) for p in points]
+            # Then, calculate the centroid from the transformed points
+            centroid = sum(transformed_points, Vec3()) / len(transformed_points)
+            return centroid
         except (AttributeError, TypeError):
             return None
 
