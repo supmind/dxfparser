@@ -112,11 +112,11 @@ class LineProcessor(EntityProcessor):
         return LineString([start.xyz[:2], end.xyz[:2]])
 
     def extract_features(self, entity, norm_params, transform):
-        center, scale = norm_params['center'], norm_params['scale']
+        center, scale, original_scale = norm_params['center'], norm_params['scale'], norm_params['original_scale']
         start, end = transform.transform(entity.dxf.start), transform.transform(entity.dxf.end)
         norm_start = SingleDrawingProcessor._normalize_coords(start, center, scale)
         norm_end = SingleDrawingProcessor._normalize_coords(end, center, scale)
-        length = start.distance(end)
+        length = start.distance(end) / original_scale
         return torch.tensor([*norm_start, *norm_end, length], dtype=torch.float)
 
 class CircleProcessor(EntityProcessor):
@@ -131,10 +131,10 @@ class CircleProcessor(EntityProcessor):
         return Point(center.xyz[:2]).buffer(radius)
 
     def extract_features(self, entity, norm_params, transform):
-        center_param, scale = norm_params['center'], norm_params['scale']
+        center_param, scale, original_scale = norm_params['center'], norm_params['scale'], norm_params['original_scale']
         center = transform.transform(entity.dxf.center)
         norm_center = SingleDrawingProcessor._normalize_coords(center, center_param, scale)
-        radius = entity.dxf.radius * transform.ux.magnitude
+        radius = (entity.dxf.radius * transform.ux.magnitude) / original_scale
         return torch.tensor([*norm_center, radius], dtype=torch.float)
 
 class ArcProcessor(EntityProcessor):
@@ -148,15 +148,31 @@ class ArcProcessor(EntityProcessor):
         return LineString(points) if len(points) > 1 else None
 
     def extract_features(self, entity, norm_params, transform):
-        center_param, scale = norm_params['center'], norm_params['scale']
+        center_param, scale, original_scale = norm_params['center'], norm_params['scale'], norm_params['original_scale']
         center = transform.transform(entity.dxf.center)
         norm_center = SingleDrawingProcessor._normalize_coords(center, center_param, scale)
-        radius = entity.dxf.radius * transform.ux.magnitude
+        radius = (entity.dxf.radius * transform.ux.magnitude) / original_scale
         # Normalize angles by dividing by 360. DXF angles can exceed 360 or be negative.
         # This initial normalization will be further standardized by the GraphBuilder.
         start_angle = entity.dxf.start_angle / 360.0
         end_angle = entity.dxf.end_angle / 360.0
         return torch.tensor([*norm_center, radius, start_angle, end_angle], dtype=torch.float)
+
+
+class DimensionProcessor(EntityProcessor):
+    def get_centroid(self, entity, transform):
+        # Centroid of a dimension is not well-defined, return insert point
+        return transform.transform(entity.dxf.insert)
+
+    def to_shapely_geom(self, entity, transform):
+        # A dimension does not have a primary geometry, return None
+        return None
+
+    def extract_features(self, entity, norm_params, transform):
+        center_param, scale = norm_params['center'], norm_params['scale']
+        insert = transform.transform(entity.dxf.insert)
+        norm_insert = SingleDrawingProcessor._normalize_coords(insert, center_param, scale)
+        return torch.tensor(norm_insert, dtype=torch.float)
 
 
 class LwPolylineProcessor(EntityProcessor):
@@ -178,7 +194,7 @@ class LwPolylineProcessor(EntityProcessor):
         return LineString(points) if len(points) > 1 else Point(points[0]) if points else None
 
     def extract_features(self, entity, norm_params, transform):
-        center, scale = norm_params['center'], norm_params['scale']
+        center, scale, original_scale = norm_params['center'], norm_params['scale'], norm_params['original_scale']
 
         # Use flattening for geometric accuracy
         points = list(entity.flattening(distance=0.1))
@@ -189,12 +205,12 @@ class LwPolylineProcessor(EntityProcessor):
 
         norm_start = SingleDrawingProcessor._normalize_coords(transformed_points[0], center, scale)
         norm_end = SingleDrawingProcessor._normalize_coords(transformed_points[-1], center, scale)
-        length = sum(p1.distance(p2) for p1, p2 in zip(transformed_points, transformed_points[1:]))
+        length = sum(p1.distance(p2) for p1, p2 in zip(transformed_points, transformed_points[1:])) / original_scale
         is_closed = 1.0 if entity.is_closed else 0.0
 
         # Extract and average width information
         widths = [p[2] for p in entity.points] + [p[3] for p in entity.points]
-        avg_width = sum(widths) / len(widths) if widths else 0.0
+        avg_width = (sum(widths) / len(widths) if widths else 0.0) / original_scale
 
         return torch.tensor([*norm_start, *norm_end, length, is_closed, avg_width], dtype=torch.float)
 
@@ -257,6 +273,7 @@ class SingleDrawingProcessor:
             'INSERT': InsertProcessor(),
             'TEXT': TextProcessor(),
             'MTEXT': MtextProcessor(),
+            'DIMENSION': DimensionProcessor(),
         }
         self.supported_entity_types = set(self.entity_processors.keys())
 
@@ -268,8 +285,8 @@ class SingleDrawingProcessor:
             logging.warning(f"Could not process file {dxf_file_path}: {e}")
             return None
 
-        entities = list(msp)
-        bbox = ezdxf.bbox.extents(entities, cache=None)
+        sanitized_entities = self._sanitize_entities(msp)
+        bbox = ezdxf.bbox.extents(sanitized_entities, cache=None)
         if not bbox.has_data: return None
 
         bbox_center, bbox_size = bbox.center, bbox.size
@@ -311,7 +328,7 @@ class SingleDrawingProcessor:
                     if entity_type == 'INSERT' and entity.dxf.name in block_templates:
                         process_entities_hierarchically(block_templates.get(entity.dxf.name, []), current_idx, transform @ entity.matrix44())
 
-        process_entities_hierarchically(entities)
+        process_entities_hierarchically(sanitized_entities)
         self._build_spatial_edges(edges_by_type, unique_id_to_node_info)
 
         final_nodes, global_to_local_idx_map = self._finalize_nodes(unique_id_to_node_info, norm_params)
@@ -469,6 +486,27 @@ class SingleDrawingProcessor:
             if remapped:
                 final_edges[(src_type, rel, dst_type)] = torch.tensor(remapped, dtype=torch.long).t().contiguous()
         return final_edges
+
+    def _sanitize_entities(self, msp: Modelspace) -> List[DXFEntity]:
+        sanitized_entities = []
+        for entity in msp:
+            if entity.dxf.dxftype == 'DIMENSION':
+                try:
+                    # Decompose dimension into atomic entities
+                    decomposed = list(entity.virtual_entities())
+                    # Inherit properties from the parent dimension
+                    for sub_entity in decomposed:
+                        sub_entity.dxf.layer = entity.dxf.layer
+                        sub_entity.dxf.color = entity.dxf.color
+                        # Note: Not all properties are applicable or exist on sub-entities
+                    sanitized_entities.extend(decomposed)
+                except Exception as e:
+                    logging.warning(f"Could not decompose DIMENSION (handle: {entity.dxf.handle}): {e}")
+                    sanitized_entities.append(entity) # Keep the original if decomposition fails
+            else:
+                sanitized_entities.append(entity)
+        return sanitized_entities
+
 
 class GraphBuilder:
     def __init__(self):
