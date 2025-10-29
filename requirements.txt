@@ -2,3 +2,5 @@ ezdxf
 sentence-transformers
 torch
 torch_geometric
+scipy
+shapely
