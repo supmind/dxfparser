@@ -31,6 +31,7 @@ class GlobalPreprocessor:
         self.sentence_transformer_model = SentenceTransformer(model_name)
         self.layer_embedding_map: Dict[str, torch.Tensor] = {}
         self.linetype_to_idx: Dict[str, int] = {}
+        self.layer_to_idx: Dict[str, int] = {}
         self.embedding_dim = self.sentence_transformer_model.get_sentence_embedding_dimension()
 
     def fit(self, dxf_file_paths: Iterable[str]) -> None:
@@ -45,8 +46,13 @@ class GlobalPreprocessor:
 
         unique_layer_names.add('0')
         layer_names_list = sorted(list(unique_layer_names))
+
+        # Continuous feature: layer name embeddings
         layer_embeddings = self.sentence_transformer_model.encode(layer_names_list, convert_to_tensor=True)
         self.layer_embedding_map = {name: emb for name, emb in zip(layer_names_list, layer_embeddings)}
+
+        # Discrete feature: layer name to integer index
+        self.layer_to_idx = {name: i for i, name in enumerate(layer_names_list)}
 
         unique_linetype_names.update(['BYLAYER', 'BYBLOCK', 'CONTINUOUS'])
         self.linetype_to_idx = {name: i for i, name in enumerate(sorted(list(unique_linetype_names)))}
@@ -58,6 +64,8 @@ class GlobalPreprocessor:
             pickle.dump(self.layer_embedding_map, f)
         with open(dir_path / "linetype_to_idx.json", "w") as f:
             json.dump(self.linetype_to_idx, f)
+        with open(dir_path / "layer_to_idx.json", "w") as f:
+            json.dump(self.layer_to_idx, f)
 
     def load(self, directory: str) -> None:
         dir_path = Path(directory)
@@ -65,6 +73,8 @@ class GlobalPreprocessor:
             self.layer_embedding_map = pickle.load(f)
         with open(dir_path / "linetype_to_idx.json", "r") as f:
             self.linetype_to_idx = json.load(f)
+        with open(dir_path / "layer_to_idx.json", "r") as f:
+            self.layer_to_idx = json.load(f)
         if self.layer_embedding_map:
             self.embedding_dim = next(iter(self.layer_embedding_map.values())).shape[0]
 
@@ -118,28 +128,12 @@ class CircleProcessor(EntityProcessor):
         radius = entity.dxf.radius * transform.ux.magnitude
         return torch.tensor([*norm_center, radius], dtype=torch.float)
 
-class ArcProcessor(EntityProcessor):
-    def get_centroid(self, entity, transform):
-        return transform.transform(entity.dxf.center)
-
-    def to_shapely_geom(self, entity, transform):
-        start_point = transform.transform(entity.start_point)
-        end_point = transform.transform(entity.end_point)
-        return LineString([start_point.xyz[:2], end_point.xyz[:2]])
-
-    def extract_features(self, entity, norm_params, transform):
-        bbox_min, scale = norm_params['bbox_min'], norm_params['scale']
-        center = transform.transform(entity.dxf.center)
-        norm_center = SingleDrawingProcessor._normalize_coords(center, bbox_min, scale)
-        radius = entity.dxf.radius * transform.ux.magnitude
-        start_angle = np.deg2rad(entity.dxf.start_angle)
-        sweep_angle = np.deg2rad(entity.dxf.end_angle - entity.dxf.start_angle)
-        return torch.tensor([*norm_center, radius, start_angle, sweep_angle], dtype=torch.float)
 
 class LwPolylineProcessor(EntityProcessor):
     def get_centroid(self, entity, transform):
         try:
-            points = [Vec3(p[:2]) for p in entity.get_points()]
+            # Use flattening to get a more accurate representation of the centroid
+            points = list(entity.flattening(distance=0.1))
             if not points: return None
             centroid = sum(points, Vec3()) / len(points)
             return transform.transform(centroid)
@@ -147,19 +141,30 @@ class LwPolylineProcessor(EntityProcessor):
             return None
 
     def to_shapely_geom(self, entity, transform):
-        points = [transform.transform(Vec3(p[:2])).xyz[:2] for p in entity.get_points()]
+        # Use flattening to accurately represent polylines with bulges
+        points = [transform.transform(p).xyz[:2] for p in entity.flattening(distance=0.1)]
         return LineString(points) if len(points) > 1 else Point(points[0]) if points else None
 
     def extract_features(self, entity, norm_params, transform):
         bbox_min, scale = norm_params['bbox_min'], norm_params['scale']
-        points = [transform.transform(Vec3(p[:2])) for p in entity.get_points()]
-        if not points:
-            return torch.zeros(8, dtype=torch.float) # 2*3 + 2
-        norm_start = SingleDrawingProcessor._normalize_coords(points[0], bbox_min, scale)
-        norm_end = SingleDrawingProcessor._normalize_coords(points[-1], bbox_min, scale)
-        length = sum(p1.distance(p2) for p1, p2 in zip(points, points[1:]))
+
+        # Use flattening for geometric accuracy
+        points = list(entity.flattening(distance=0.1))
+        transformed_points = [transform.transform(p) for p in points]
+
+        if not transformed_points:
+            return torch.zeros(9, dtype=torch.float) # 2*3 + 3 (length, closed, width)
+
+        norm_start = SingleDrawingProcessor._normalize_coords(transformed_points[0], bbox_min, scale)
+        norm_end = SingleDrawingProcessor._normalize_coords(transformed_points[-1], bbox_min, scale)
+        length = sum(p1.distance(p2) for p1, p2 in zip(transformed_points, transformed_points[1:]))
         is_closed = 1.0 if entity.is_closed else 0.0
-        return torch.tensor([*norm_start, *norm_end, length, is_closed], dtype=torch.float)
+
+        # Extract and average width information
+        widths = [p[2] for p in entity.points] + [p[3] for p in entity.points]
+        avg_width = sum(widths) / len(widths) if widths else 0.0
+
+        return torch.tensor([*norm_start, *norm_end, length, is_closed, avg_width], dtype=torch.float)
 
 class GenericPointProcessor(EntityProcessor):
     def get_centroid(self, entity, transform):
@@ -203,9 +208,10 @@ class SingleDrawingProcessor:
         if point is None: return np.zeros(3)
         return np.array(((point - bbox_min) * scale).xyz)
 
-    def __init__(self, layer_embedding_map: Dict[str, torch.Tensor], linetype_to_idx: Dict[str, int], k_neighbors: int = 3, model_name: str = 'paraphrase-multilingual-MiniLM-L12-v2'):
+    def __init__(self, layer_embedding_map: Dict[str, torch.Tensor], linetype_to_idx: Dict[str, int], layer_to_idx: Dict[str, int], k_neighbors: int = 3, model_name: str = 'paraphrase-multilingual-MiniLM-L12-v2'):
         self.layer_embedding_map = layer_embedding_map
         self.linetype_to_idx = linetype_to_idx
+        self.layer_to_idx = layer_to_idx
         self.k_neighbors = k_neighbors
         self.embedding_dim = next(iter(layer_embedding_map.values()), torch.zeros(384)).shape[0]
         self.zero_embedding = torch.zeros(self.embedding_dim, dtype=torch.float)
@@ -214,7 +220,6 @@ class SingleDrawingProcessor:
         self.entity_processors: Dict[str, EntityProcessor] = {
             'LINE': LineProcessor(),
             'CIRCLE': CircleProcessor(),
-            'ARC': ArcProcessor(),
             'LWPOLYLINE': LwPolylineProcessor(),
             'INSERT': InsertProcessor(),
             'TEXT': TextProcessor(),
@@ -230,7 +235,10 @@ class SingleDrawingProcessor:
             logging.warning(f"Could not process file {dxf_file_path}: {e}")
             return None
 
-        bbox = ezdxf.bbox.extents(msp, cache=None)
+        # Pre-processing step: Decompose complex entities like ARCs into simpler ones (LINEs)
+        decomposed_entities = self._decompose_complex_entities(msp)
+
+        bbox = ezdxf.bbox.extents(decomposed_entities, cache=None)
         if not bbox.has_data: return None
 
         bbox_min, bbox_size = bbox.extmin, bbox.size
@@ -248,7 +256,8 @@ class SingleDrawingProcessor:
             for entity in entities:
                 entity_type = entity.dxf.dxftype
                 if hasattr(entity, 'dxf') and entity_type in self.supported_entity_types:
-                    unique_id = entity.dxf.handle
+                    # For decomposed entities, the handle is not unique. We must create a new unique id.
+                    unique_id = entity.dxf.handle if entity.dxf.handle is not None else f"decomposed_{node_counter}"
                     if unique_id not in unique_id_to_node_info:
                         processor = self.entity_processors[entity_type]
                         node_type = 'block_instance' if entity_type == 'INSERT' else entity_type
@@ -266,7 +275,7 @@ class SingleDrawingProcessor:
                     if entity_type == 'INSERT' and entity.dxf.name in block_templates:
                         process_entities_hierarchically(block_templates.get(entity.dxf.name, []), current_idx, transform @ entity.matrix44())
 
-        process_entities_hierarchically(msp)
+        process_entities_hierarchically(decomposed_entities)
         self._build_spatial_edges(edges_by_type, unique_id_to_node_info)
 
         final_nodes, global_to_local_idx_map = self._finalize_nodes(unique_id_to_node_info, norm_params)
@@ -344,12 +353,17 @@ class SingleDrawingProcessor:
             if not processor: continue
 
             try:
+                # --- Continuous Features ---
                 geometric_features = processor.extract_features(entity, norm_params, transform)
+
+                # Handle RGB color (already resolved for BYLAYER/BYBLOCK)
+                rgb = entity.rgb if entity.rgb is not None else (255, 255, 255)
+                normalized_rgb = torch.tensor(rgb, dtype=torch.float) / 255.0
 
                 if entity_type in {'TEXT', 'MTEXT'}:
                     text_content = entity.dxf.text if entity_type == 'TEXT' else entity.text
                     text_embedding = self.sentence_transformer_model.encode(text_content, convert_to_tensor=True)
-                    continuous_features = torch.cat([geometric_features, text_embedding.cpu()])
+                    continuous_features = torch.cat([geometric_features, normalized_rgb, text_embedding.cpu()])
                 else:
                     padded_geom_features = torch.zeros(self.GEOMETRIC_FEATURE_SIZE)
                     padded_geom_features[:len(geometric_features)] = geometric_features
@@ -360,15 +374,34 @@ class SingleDrawingProcessor:
                     continuous_features = torch.cat([
                         padded_geom_features,
                         torch.tensor([norm_params.get('original_scale', 1.0)], dtype=torch.float),
+                        normalized_rgb,
                         layer_embedding,
                     ])
+
+                # --- Discrete Features ---
+                layer_name = entity.dxf.layer
+                layer_idx = self.layer_to_idx.get(layer_name, 0)
+
+                # Resolve BYLAYER linetype
+                linetype_name = entity.dxf.linetype
+                if linetype_name.upper() == 'BYLAYER':
+                    layer = entity.doc.layers.get(layer_name)
+                    linetype_name = layer.dxf.linetype
+                linetype_idx = self.linetype_to_idx.get(linetype_name, 0)
+
+                color_aci = entity.dxf.color # ACI color index
+
+                # Resolve BYLAYER lineweight
+                lineweight = entity.dxf.lineweight
+                if lineweight == -1: # -1 is BYLAYER
+                    layer = entity.doc.layers.get(layer_name)
+                    lineweight = layer.dxf.lineweight
+
+                discrete_features = torch.tensor([layer_idx, linetype_idx, color_aci, lineweight], dtype=torch.long)
+
             except Exception as e:
                 logging.debug(f"Feature extraction error for {entity_type} (handle: {entity.dxf.handle}): {e}")
                 continue
-
-            linetype_name = getattr(entity.dxf, 'linetype', 'BYLAYER')
-            linetype_idx = self.linetype_to_idx.get(linetype_name, 0)
-            discrete_features = torch.tensor([linetype_idx], dtype=torch.long)
 
             local_idx = len(final_nodes[node_type]['x'])
             final_nodes[node_type]['x'].append(continuous_features)
@@ -380,6 +413,26 @@ class SingleDrawingProcessor:
                 data['x'] = torch.stack(data['x'])
                 data['discrete'] = torch.stack(data['discrete'])
         return final_nodes, global_to_local_idx_map
+
+    def _decompose_complex_entities(self, msp: Modelspace) -> List[DXFEntity]:
+        decomposed_entities = []
+        for entity in msp:
+            if entity.dxf.dxftype == 'ARC':
+                vertices = list(entity.flattening(distance=0.1))
+                for i in range(len(vertices) - 1):
+                    # Create a new, temporary LINE entity. It doesn't belong to any document.
+                    line = ezdxf.new('LINE', dxfattribs={
+                        'start': vertices[i],
+                        'end': vertices[i+1],
+                        'layer': entity.dxf.layer,
+                        'color': entity.dxf.color,
+                        'linetype': entity.dxf.linetype,
+                        'lineweight': entity.dxf.lineweight,
+                    })[0]
+                    decomposed_entities.append(line)
+            else:
+                decomposed_entities.append(entity)
+        return decomposed_entities
 
     def _finalize_edges(self, edges_by_type, unique_id_to_node_info, global_to_local_idx_map):
         final_edges = {}
@@ -465,7 +518,7 @@ def _demonstrate_full_pipeline():
         gp = GlobalPreprocessor()
         gp.fit([dxf_path])
 
-        sp = SingleDrawingProcessor(gp.layer_embedding_map, gp.linetype_to_idx)
+        sp = SingleDrawingProcessor(gp.layer_embedding_map, gp.linetype_to_idx, gp.layer_to_idx)
         intermediate_data = sp.process(dxf_path)
 
         assert intermediate_data is not None, "Processing failed, returned None."
