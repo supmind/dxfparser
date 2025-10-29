@@ -1,0 +1,5 @@
+ezdxf==1.4.3
+sentence-transformers==5.1.2
+torch==2.9.0
+numpy==2.3.4
+scikit-learn==1.7.2
