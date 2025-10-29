@@ -112,10 +112,10 @@ class LineProcessor(EntityProcessor):
         return LineString([start.xyz[:2], end.xyz[:2]])
 
     def extract_features(self, entity, norm_params, transform):
-        bbox_min, scale = norm_params['bbox_min'], norm_params['scale']
+        center, scale = norm_params['center'], norm_params['scale']
         start, end = transform.transform(entity.dxf.start), transform.transform(entity.dxf.end)
-        norm_start = SingleDrawingProcessor._normalize_coords(start, bbox_min, scale)
-        norm_end = SingleDrawingProcessor._normalize_coords(end, bbox_min, scale)
+        norm_start = SingleDrawingProcessor._normalize_coords(start, center, scale)
+        norm_end = SingleDrawingProcessor._normalize_coords(end, center, scale)
         length = start.distance(end)
         return torch.tensor([*norm_start, *norm_end, length], dtype=torch.float)
 
@@ -131,9 +131,9 @@ class CircleProcessor(EntityProcessor):
         return Point(center.xyz[:2]).buffer(radius)
 
     def extract_features(self, entity, norm_params, transform):
-        bbox_min, scale = norm_params['bbox_min'], norm_params['scale']
+        center_param, scale = norm_params['center'], norm_params['scale']
         center = transform.transform(entity.dxf.center)
-        norm_center = SingleDrawingProcessor._normalize_coords(center, bbox_min, scale)
+        norm_center = SingleDrawingProcessor._normalize_coords(center, center_param, scale)
         radius = entity.dxf.radius * transform.ux.magnitude
         return torch.tensor([*norm_center, radius], dtype=torch.float)
 
@@ -148,9 +148,9 @@ class ArcProcessor(EntityProcessor):
         return LineString(points) if len(points) > 1 else None
 
     def extract_features(self, entity, norm_params, transform):
-        bbox_min, scale = norm_params['bbox_min'], norm_params['scale']
+        center_param, scale = norm_params['center'], norm_params['scale']
         center = transform.transform(entity.dxf.center)
-        norm_center = SingleDrawingProcessor._normalize_coords(center, bbox_min, scale)
+        norm_center = SingleDrawingProcessor._normalize_coords(center, center_param, scale)
         radius = entity.dxf.radius * transform.ux.magnitude
         # Normalize angles by dividing by 360. DXF angles can exceed 360 or be negative.
         # This initial normalization will be further standardized by the GraphBuilder.
@@ -178,7 +178,7 @@ class LwPolylineProcessor(EntityProcessor):
         return LineString(points) if len(points) > 1 else Point(points[0]) if points else None
 
     def extract_features(self, entity, norm_params, transform):
-        bbox_min, scale = norm_params['bbox_min'], norm_params['scale']
+        center, scale = norm_params['center'], norm_params['scale']
 
         # Use flattening for geometric accuracy
         points = list(entity.flattening(distance=0.1))
@@ -187,8 +187,8 @@ class LwPolylineProcessor(EntityProcessor):
         if not transformed_points:
             return torch.zeros(9, dtype=torch.float) # 2*3 + 3 (length, closed, width)
 
-        norm_start = SingleDrawingProcessor._normalize_coords(transformed_points[0], bbox_min, scale)
-        norm_end = SingleDrawingProcessor._normalize_coords(transformed_points[-1], bbox_min, scale)
+        norm_start = SingleDrawingProcessor._normalize_coords(transformed_points[0], center, scale)
+        norm_end = SingleDrawingProcessor._normalize_coords(transformed_points[-1], center, scale)
         length = sum(p1.distance(p2) for p1, p2 in zip(transformed_points, transformed_points[1:]))
         is_closed = 1.0 if entity.is_closed else 0.0
 
@@ -209,10 +209,10 @@ class GenericPointProcessor(EntityProcessor):
         return Point(centroid.xyz[:2]) if centroid else None
 
     def extract_features(self, entity, norm_params, transform):
-        bbox_min, scale = norm_params['bbox_min'], norm_params['scale']
+        center, scale = norm_params['center'], norm_params['scale']
         insert_point = self.get_centroid(entity, transform)
         if insert_point:
-            norm_insert = SingleDrawingProcessor._normalize_coords(insert_point, bbox_min, scale)
+            norm_insert = SingleDrawingProcessor._normalize_coords(insert_point, center, scale)
             return torch.tensor(norm_insert, dtype=torch.float)
         return torch.zeros(3, dtype=torch.float)
 
@@ -236,9 +236,9 @@ class SingleDrawingProcessor:
     GEOMETRIC_FEATURE_SIZE = 15
 
     @staticmethod
-    def _normalize_coords(point: Vec3, bbox_min: Vec3, scale: float) -> np.ndarray:
+    def _normalize_coords(point: Vec3, center: Vec3, scale: float) -> np.ndarray:
         if point is None: return np.zeros(3)
-        return np.array(((point - bbox_min) * scale).xyz)
+        return np.array(((point - center) * scale).xyz)
 
     def __init__(self, layer_embedding_map: Dict[str, torch.Tensor], linetype_to_idx: Dict[str, int], layer_to_idx: Dict[str, int], sentence_transformer_model: SentenceTransformer, k_neighbors: int = 3):
         self.layer_embedding_map = layer_embedding_map
@@ -272,10 +272,10 @@ class SingleDrawingProcessor:
         bbox = ezdxf.bbox.extents(entities, cache=None)
         if not bbox.has_data: return None
 
-        bbox_min, bbox_size = bbox.extmin, bbox.size
+        bbox_center, bbox_size = bbox.center, bbox.size
         original_scale = max(bbox_size) if bbox_size and max(bbox_size) > 0 else 1.0
         norm_scale = 1.0 / original_scale if original_scale > 1e-8 else 1.0
-        norm_params = {'bbox_min': bbox_min, 'scale': norm_scale, 'original_scale': original_scale}
+        norm_params = {'center': bbox_center, 'scale': norm_scale, 'original_scale': original_scale}
 
         unique_id_to_node_info: Dict[str, NodeInfo] = {}
         node_counter = 0
